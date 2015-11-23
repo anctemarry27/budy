@@ -37,9 +37,15 @@ __copyright__ = "Copyright (c) 2008-2015 Hive Solutions Lda."
 __license__ = "Apache License, Version 2.0"
 """ The license for the module """
 
+import os
+import zipfile
+import tempfile
+import mimetypes
+
 import appier
 
 from . import base
+from . import product
 
 BASE_URL = "http://localhost:8080/"
 
@@ -81,6 +87,68 @@ class Media(base.BudyBase):
     @classmethod
     def list_names(cls):
         return ["id", "description", "label", "order", "size"]
+
+    @classmethod
+    @appier.operation(
+        name = "Import Media",
+        parameters = (("Media File", "file", "file"),)
+    )
+    def import_media_s(cls, file, strict = False):
+        _file_name, mime_type, data = file
+        is_zip = mime_type in ("application/zip", "application/octet-stream")
+        if not is_zip and strict:
+            raise appier.OperationalError(
+                message = "Invalid mime type '%s'" % mime_type
+            )
+        buffer = appier.legacy.BytesIO(data)
+        file = zipfile.ZipFile(buffer, "r")
+        target = tempfile.mkdtemp()
+        try: file.extractall(target)
+        finally: file.close()
+
+        names = os.listdir(target)
+        for name in names:
+            path = os.path.join(target, name)
+            if not os.path.isdir(path): continue
+            image_names = os.listdir(path)
+            for image_name in image_names:
+                base, extension = os.path.splitext(image_name)
+                if not extension in (".png", ".jpeg", ".jpg"): continue
+
+                content_type, _encoding = mimetypes.guess_type(image_name, strict = False)
+
+                product_id = base
+                label = "undefined"
+                order = 0
+                size = "large"
+
+                base_s = base.split("_")
+                if len(base_s) >= 1: product_id = base_s[0]
+                if len(base_s) >= 2: order = int(base_s[1])
+                if len(base_s) >= 3: label = base_s[2]
+                if len(base_s) >= 4: size = base_s[3]
+
+                description = "%s_%s_%s" % (product_id, label, size)
+
+                image_path = os.path.join(path, image_name)
+                image_file = open(image_path, "rb")
+                try: image_data = image_file.read()
+                finally: image_file.close()
+
+                media = Media(
+                    description = description,
+                    label = label,
+                    order = order,
+                    size = size,
+                    file = appier.File((product_id, content_type, image_data))
+                )
+                media.save()
+
+                _product = product.Product.get(product_id = product_id, raise_e = False)
+                if not _product: continue
+
+                _product.images.append(media)
+                _product.save()
 
     @classmethod
     def _build(cls, model, map):
